@@ -10,7 +10,8 @@ from typing import Literal
 import httpx
 import jwt
 import redis
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, generate_latest
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, selectinload
@@ -24,6 +25,7 @@ TargetStatus = Literal["pending", "processing", "published", "failed"]
 app = FastAPI(title="SocialSync post-service")
 configure_logging("post-service")
 logger = logging.getLogger("socialsync.posts")
+HTTP_REQUESTS = Counter("socialsync_post_http_requests_total", "HTTP requests handled by post-service", ["method", "path", "status"])
 queue = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True, socket_connect_timeout=3)
 
 
@@ -37,6 +39,8 @@ async def correlation(request: Request, call_next):
     start = time.monotonic()
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
+    route = request.scope.get("route")
+    HTTP_REQUESTS.labels(request.method, route.path if route else "unmatched", str(response.status_code)).inc()
     log("request", request_id=request.state.request_id, method=request.method, path=request.url.path, status=response.status_code, duration_ms=round((time.monotonic() - start) * 1000))
     return response
 
@@ -121,6 +125,9 @@ def verify_media(media_id: uuid.UUID, request_id: str):
 def health():
     return {"status": "ok"}
 
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/ready")
 def ready(db: Session = Depends(get_db)):
